@@ -4,16 +4,48 @@ from scipy.sparse.linalg import spsolve
 from scipy.spatial import Voronoi, cKDTree
 import time
 import sys
+import multiprocessing
+from functools import partial
+
+def simulate_single_frequency(model, freq):
+    """
+    Simulates impedance at a single frequency for multiprocessing.
+    """
+    start_time = time.time()
+    omega = 2 * np.pi * freq
+    
+    # 1. Build the full Y matrix -> Check SI from Eckhart's paper
+    Y_full = model.build_admittance_matrix(omega)
+    
+    # 2. Extract the sub-matrix for active (non-ground) nodes
+    active_nodes = np.arange(model.num_voxels - len(model.bottom_nodes))
+    Y_active = Y_full[active_nodes, :][:, active_nodes]
+    
+    # 3. Get the current vector for active nodes
+    i_vector = model._build_current_vector(i_total=1.0)
+    i_active = i_vector[active_nodes]
+    
+    # 4. Solve the linear system Y*phi = i
+    try:
+        phi_active = spsolve(Y_active, i_active)
+    except Exception as e:
+        print(f"Solver failed at f={freq} Hz. Error: {e}")
+        return np.nan
+    
+    # 5. Calculate total Z.
+    phi_top_nodes = phi_active[model.top_nodes]
+    Z_total = np.mean(phi_top_nodes)
+    
+    print(f"f = {freq:.2e} Hz | Z = {Z_total.real:.2e} - j{abs(Z_total.imag):.2e} Ohm | Time = {time.time()-start_time:.2f}s")
+    return Z_total
+
+
 
 class SyntheticMicrostructure:
-    """
-    Generates a 3D procedural microstructure, including a voxelized
-    Voronoi grain map and a 2D porous interface map.
-    This class replaces the need for an SEM image input.
-    """
+# For now, consider only tesselation-based microstructure, we'll add physical model later
     def __init__(self, grid_dims, num_grains):
-        self.grid_dims = np.array(grid_dims)
-        self.num_grains = num_grains
+        self.grid_dims = np.array(grid_dims) #grid_dims is (z,y,x) voxels defined later
+        self.num_grains = num_grains #Q: why take separate num_grains?
         self.num_voxels = np.prod(self.grid_dims)
         
         print(f"Generating {self.grid_dims} microstructure with {num_grains} grains...")
@@ -55,18 +87,18 @@ class SyntheticMicrostructure:
             contact_ratio (float): The fractional contact area (0.0 to 1.0).
         """
         if contact_ratio == 1.0:
-            self.interface_map = np.ones((self.grid_dims[0], self.grid_dims[1]), dtype=int)
+            self.interface_map = np.ones((self.grid_dims[1], self.grid_dims[2]), dtype=int)
         else:
             # Create a simple random distribution of pores
-            self.interface_map = (np.random.rand(self.grid_dims[0], self.grid_dims[1]) < contact_ratio).astype(int)
+            self.interface_map = (np.random.rand(self.grid_dims[1], self.grid_dims[2]) < contact_ratio).astype(int)
         print(f"Generated interface with {np.mean(self.interface_map)*100:.2f}% contact area.")
 
     def get_voxel_id(self, z, y, x):
         """Convert 3D index to 1D node index."""
-        if 0 <= z < self.grid_dims[2] and \
+        if 0 <= z < self.grid_dims[0] and \
            0 <= y < self.grid_dims[1] and \
-           0 <= x < self.grid_dims[0]:
-            return x + (y * self.grid_dims[0]) + (z * self.grid_dims[0] * self.grid_dims[1])
+           0 <= x < self.grid_dims[2]:
+            return x + (y * self.grid_dims[2]) + (z * self.grid_dims[2] * self.grid_dims[1])
         return None
 
     def get_grain_id(self, k):
@@ -95,8 +127,8 @@ class ImpedanceNetworkModel:
         self.p = params
         self.num_voxels = self.m.num_voxels
         
-        self.top_nodes = np.arange(self.m.grid_dims[0] * self.m.grid_dims[1])
-        self.bottom_nodes = np.arange(self.num_voxels - self.m.grid_dims[0] * self.m.grid_dims[1], self.num_voxels)
+        self.top_nodes = np.arange(self.m.grid_dims[1] * self.m.grid_dims[2])
+        self.bottom_nodes = np.arange(self.num_voxels - self.m.grid_dims[1] * self.m.grid_dims[2], self.num_voxels)
 
         self._calculate_element_properties()
 
@@ -131,7 +163,7 @@ class ImpedanceNetworkModel:
         """
         THE UNIFIED HYBRID MODEL KERNEL.
         Calculates the complex admittance y_kj = 1/Z_kj between
-        two adjacent nodes based on the rules in Section 3.3.
+        two adjacent nodes 
         """
         
         # Function to calculate admittance of a parallel RC element
@@ -141,13 +173,13 @@ class ImpedanceNetworkModel:
             return (1.0 / R) + (1j * w * C)
             
         # Get 3D coordinates
-        k_z = k_idx // (self.m.grid_dims[0] * self.m.grid_dims[1])
-        k_y = (k_idx % (self.m.grid_dims[0] * self.m.grid_dims[1])) // self.m.grid_dims[0]
-        k_x = k_idx % self.m.grid_dims[0]
+        k_z = k_idx // (self.m.grid_dims[1] * self.m.grid_dims[2])
+        k_y = (k_idx // self.m.grid_dims[2]) % self.m.grid_dims[1]
+        k_x = k_idx % self.m.grid_dims[2]
         
-        j_z = j_idx // (self.m.grid_dims[0] * self.m.grid_dims[1])
-        j_y = (j_idx % (self.m.grid_dims[0] * self.m.grid_dims[1])) // self.m.grid_dims[0]
-        j_x = j_idx % self.m.grid_dims[0]
+        j_z = j_idx // (self.m.grid_dims[1] * self.m.grid_dims[2])
+        j_y = (j_idx // self.m.grid_dims[2]) % self.m.grid_dims[1]
+        j_x = j_idx % self.m.grid_dims[2]
         
         # Get grain IDs
         grain_k = self.m.grain_map[k_z, k_y, k_x]
@@ -220,9 +252,9 @@ class ImpedanceNetworkModel:
         # Iterate over all voxels (nodes)
         for k_idx in range(self.num_voxels):
             # Get 3D coords for neighbor finding
-            k_z = k_idx // (self.m.grid_dims[0] * self.m.grid_dims[1])
-            k_y = (k_idx % (self.m.grid_dims[0] * self.m.grid_dims[1])) // self.m.grid_dims[0]
-            k_x = k_idx % self.m.grid_dims[0]
+            k_z = k_idx // (self.m.grid_dims[1] * self.m.grid_dims[2])
+            k_y = (k_idx // self.m.grid_dims[2]) % self.m.grid_dims[1]
+            k_x = k_idx % self.m.grid_dims[2]
             
             Y_kk_diag = 0 + 0j # Diagonal element Y_kk = sum(y_kj)
             
@@ -234,9 +266,9 @@ class ImpedanceNetworkModel:
                 j_z, j_y, j_x = k_z + dz, k_y + dy, k_x + dx
                 
                 # Check if neighbor is inside the grid
-                if 0 <= j_z < self.m.grid_dims[2] and \
+                if 0 <= j_z < self.m.grid_dims[0] and \
                    0 <= j_y < self.m.grid_dims[1] and \
-                   0 <= j_x < self.m.grid_dims[0]:
+                   0 <= j_x < self.m.grid_dims[2]:
                     
                     j_idx = self.m.get_voxel_id(j_z, j_y, j_x)
                     
@@ -301,7 +333,7 @@ class ImpedanceNetworkModel:
         i_vector = np.zeros(self.num_voxels, dtype=complex)
         
         # Inject current at top nodes (z=0)
-        num_top_nodes = self.m.grid_dims[0] * self.m.grid_dims[1]
+        num_top_nodes = self.m.grid_dims[1] * self.m.grid_dims[2]
         i_per_node = i_total / num_top_nodes
         i_vector[self.top_nodes] = i_per_node
         
@@ -310,46 +342,15 @@ class ImpedanceNetworkModel:
     def run_simulation(self, frequencies):
         """
         Runs the full impedance simulation over a range of frequencies.
+        Uses multiprocessing for parallel computation across frequencies.
         """
-        Z_spectrum = []
-        i_vector = self._build_current_vector(i_total=1.0)
+        # Use multiprocessing to parallelize over frequencies
+        num_cores = multiprocessing.cpu_count()
+        print(f"Using {num_cores} CPU cores for parallel simulation...")
         
-        # We solve for a reduced system. Nodes at the bottom are
-        # set to phi=0 (ground) and removed from the matrix.
+        with multiprocessing.Pool(processes=num_cores) as pool:
+            Z_spectrum = pool.map(partial(simulate_single_frequency, self), frequencies)
         
-        # Get all nodes *except* the bottom layer
-        active_nodes = np.arange(self.num_voxels - len(self.bottom_nodes))
-        
-        for freq in frequencies:
-            start_time = time.time()
-            omega = 2 * np.pi * freq
-            
-            # 1. Build the full Y matrix
-            Y_full = self.build_admittance_matrix(omega)
-            
-            # 2. Extract the sub-matrix for active (non-ground) nodes
-            Y_active = Y_full[active_nodes, :][:, active_nodes]
-            
-            # 3. Get the current vector for active nodes
-            i_active = i_vector[active_nodes]
-            
-            # 4. Solve the linear system Y*phi = i
-            try:
-                phi_active = spsolve(Y_active, i_active)
-            except Exception as e:
-                print(f"Solver failed at f={freq} Hz. Error: {e}")
-                Z_spectrum.append(np.nan)
-                continue
-            
-            # 5. Calculate total Z.
-            # Z_total = phi_top_avg / i_total
-            # Since i_total = 1.0, Z_total = phi_top_avg
-            phi_top_nodes = phi_active[self.top_nodes]
-            Z_total = np.mean(phi_top_nodes)
-            
-            Z_spectrum.append(Z_total)
-            print(f"f = {freq:.2e} Hz | Z = {Z_total.real:.2e} - j{abs(Z_total.imag):.2e} Ohm | Time = {time.time()-start_time:.2f}s")
-            
         return np.array(Z_spectrum)
 
 
@@ -363,45 +364,79 @@ def run_full_simulation():
     and plot the results.
     """
     
-    # --- 1. DEFINE USER-INPUT PARAMETERS ---
-    # (as requested in the query)
+    # --- 1. DEFINE INPUT PARAMETERS ---
     
     # Table 1: Unified Model Input Parameters
     parameters = {
         # Grid & Microstructure
-        "grid_dims": (10, 10, 10),      # (z, y, x) voxels. Keep small (e.g., 10^3) for quick test. 
-                                        # A 50^3 grid (125k nodes) is a large computation.
-        "voxel_size": 100e-9,           # (m) 100 nm voxels
-        "num_grains": 50,               # Number of Voronoi seeds
-        "contact_ratio": 0.5,           # Fractional contact area (1.0 = ideal, 0.5 = 50% pores)
+        "physical_dims": (0.6e-6, 2.65e-6, 2.65e-6),  # (z, y, x) in meters
+        "avg_grain_diameter": 0.14e-6,  # (m) average grain diameter
+        "min_voxels_per_grain": 10,  # minimum voxels per grain (used to calculate total voxels)
+        "contact_ratio": 0.1,         # Fractional contact area (1.0 = ideal, 0.5 = 50% pores)
         
-        # Bulk Properties (Based on typical ceramic)
-        "sigma_bulk": 1.4e-3,             # (S/m)
-        "epsilon_bulk": 150 * 8.854e-12, # (F/m) (epsilon_r = 100)
+        # Bulk Properties 
+        "sigma_bulk": 1.4 * 1e-1,        # (in S/m, we enter in mS/cm -> x10^-1 is the conversion factor)
+        "epsilon_bulk": 150 * 8.854e-12, # (F/m) (Enter only relative permittivity here)
         
         # Grain Boundary Properties (Highly resistive)
-        "sigma_gb": 1e-5,               # (S/m) (3 orders of magnitude lower than bulk)
-        "epsilon_gb": 80 * 8.854e-12,   # (F/m)
-        "delta_gb": 10e-9,              # (m) Effective thickness
+        "sigma_gb": 1e-3,         # (S/m) (3 orders of magnitude lower than bulk)
+        "epsilon_gb": 10 * 8.854e-12,   # (F/m)
+        "delta_gb": 2e-9,              # (m) Effective thickness
         
         # Interface Properties (Constriction & CT)
-        "epsilon_pore": 6 * 8.854e-12,   # (F/m) (Permittivity of vacuum)
-        "delta_pore": 50e-9,            # (m) Depth of the porous interface layer
-        "sigma_ct": 0.1,                # (S/m) (High conductivity for charge transfer)
-        "epsilon_ct": 100 * 8.854e-12,   # (F/m)
-        "delta_ct": 5e-9                # (m) Effective thickness of CT layer
+        "epsilon_pore": 6 * 8.854e-12,   # (F/m) (Permittivity of carbonate)
+        "delta_pore": 50e-8,           # (m) Depth of the porous interface layer-takes place in parallel with CT dependent on contact ratio)
+        "sigma_ct": 1.33e-7,         # (S/m) (Take \tau_ct = 10^-2) 
+        "epsilon_ct": 150* 8.854e-12,   # (F/m)
+        "delta_ct": 5e-10       # (m) Effective thickness of CT layer -> start with some approximation
     }
+    
+    # Compute derived parameters
+    physical_dims = parameters['physical_dims']
+    avg_grain_diameter = parameters['avg_grain_diameter']
+    min_voxels_per_grain = parameters['min_voxels_per_grain']
+    
+    total_volume = physical_dims[0] * physical_dims[1] * physical_dims[2]
+    avg_volume_grain = (4/3) * np.pi * (avg_grain_diameter / 2)**3
+    num_grains = max(1, int(total_volume / avg_volume_grain))
+    
+    num_voxels = num_grains * min_voxels_per_grain
+    voxel_size = (total_volume / num_voxels)**(1/3)
+    grid_dims = tuple(round(physical_dims[i] / voxel_size) for i in range(3))
+    
+    parameters['voxel_size'] = voxel_size
+    parameters['grid_dims'] = grid_dims
+    parameters['num_grains'] = num_grains
+    parameters['num_voxels'] = num_voxels
+    
+    print(f"Computed grid_dims: {grid_dims}, voxel_size: {voxel_size:.2e} m, num_grains: {num_grains}, num_voxels: {num_voxels}")
     
     # --- 2. SETUP MICROSTRUCTURE ---
     micro = SyntheticMicrostructure(parameters['grid_dims'], parameters['num_grains'])
     micro.generate_porous_interface(parameters['contact_ratio'])
     
+    # Compute and print grain sizes
+    unique_grains, counts = np.unique(micro.grain_map, return_counts=True)
+    voxel_size = parameters['voxel_size']
+    
+    # Grain sizes in voxels
+    grain_sizes_voxels = dict(zip(unique_grains, counts))
+    print(f"Average grain size: {np.mean(counts):.1f} voxels")
+    
+    # Convert to equivalent spherical diameter in nm
+    volumes = counts * voxel_size**3  # m^3
+    d_eq = 2 * (3 * volumes / (4 * np.pi))**(1/3)  # equivalent diameter in m
+    d_eq_nm = d_eq * 1e9  # in nm
+    grain_sizes_nm = dict(zip(unique_grains, d_eq_nm))
+    print(f"Grain sizes (equivalent diameter, nm): { {k: f'{v:.1f}' for k, v in grain_sizes_nm.items()} }")
+    print(f"Average grain size: {np.mean(d_eq_nm):.1f} nm")
+    
     # --- 3. SETUP AND RUN MODEL ---
     model = ImpedanceNetworkModel(micro, parameters)
     
     # Define frequency range
-    frequencies = np.logspace(-2, 11, 100) # 0.01 Hz to 10 MHz
-    
+    frequencies = np.logspace(0,9,100) # 1 Hz to 10 MHz
+
     print("\nStarting Unified Impedance Simulation...")
     Z_spectrum = model.run_simulation(frequencies)
     
@@ -418,8 +453,8 @@ def run_full_simulation():
         Z_spectrum = Z_spectrum[valid]
         frequencies = frequencies[valid]
 
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
-        
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 6))
+
         # Nyquist Plot
         ax1.plot(Z_spectrum.real, -Z_spectrum.imag, 'o-', mfc='r', mec='k')
         ax1.set_xlabel("Z' (Ohm)")
@@ -428,32 +463,32 @@ def run_full_simulation():
         ax1.grid(True)
         ax1.axis('equal')
         
-        # Bode Plot
-        ax2.loglog(frequencies, np.abs(Z_spectrum), 'o-', label='|Z|')
-        ax2.loglog(frequencies, -Z_spectrum.imag, 's--', label="-Z''", mfc='none')
-        ax2.set_xlabel("Frequency (Hz)")
-        ax2.set_ylabel("Impedance (Ohm)")
-        ax2.set_title("Bode Plot")
-        ax2.grid(True)
-        ax2.legend()
+        # Bode Plot (change to ax3 while using and add ax3 to plt.subplots)
+        # ax2.loglog(frequencies, np.abs(Z_spectrum), 'o-', label='|Z|')
+        # ax2.loglog(frequencies, -Z_spectrum.imag, 's--', label="-Z''", mfc='none')
+        # ax2.set_xlabel("Frequency (Hz)")
+        # ax2.set_ylabel("Impedance (Ohm)")
+        # ax2.set_title("Bode Plot")
+        # ax2.grid(True)
+        # ax2.legend()
         
         # DRT Plot
         try:
-            sys.path.append('pyDRTtools-master')
+            sys.path.append(r'C:\Users\xshar\Documents\GitHub\pyDRTsim\pyDRTtools-master')
             from pyDRTtools.runs import EIS_object, simple_run
             
             eis = EIS_object(frequencies, Z_spectrum.real, Z_spectrum.imag)
             simple_run(eis, cv_type='custom', reg_param=1e-4)
             
-            ax3.plot(eis.out_tau_vec, eis.gamma, 'b-')
-            ax3.set_xlabel("Time Constant (s)")
-            ax3.set_ylabel("DRT")
-            ax3.set_title("Distribution of Relaxation Times")
-            ax3.grid(True)
-            ax3.set_xscale('log')
+            ax2.plot(eis.out_tau_vec, eis.gamma, 'b-')
+            ax2.set_xlabel("Time Constant (s)")
+            ax2.set_ylabel("DRT")
+            ax2.set_title("Distribution of Relaxation Times")
+            ax2.grid(True)
+            ax2.set_xscale('log')
         except ImportError:
-            ax3.text(0.5, 0.5, 'pyDRTtools not available', transform=ax3.transAxes, ha='center')
-            ax3.set_title("DRT Plot (Unavailable)")
+            ax2.text(0.5, 0.5, 'pyDRTtools not available', transform=ax2.transAxes, ha='center')
+            ax2.set_title("DRT Plot (Unavailable)")
         
         plt.suptitle("Unified 3D Impedance Simulation (Polycrystalline + Constriction)")
         plt.tight_layout()
@@ -465,7 +500,8 @@ def run_full_simulation():
         print(Z_spectrum)
 
 # Uncomment the line below to run the simulation
-run_full_simulation()
+if __name__ == '__main__':
+    run_full_simulation()
 
 print("Unified 3D Impedance Model code is defined.")
 print("To run, save this script and call 'run_full_simulation()'.")
