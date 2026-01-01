@@ -9,14 +9,14 @@ R_ohmic = 10  # Ohmic resistance (Ohm)
 
 # List of (R, C) pairs for RC elements in parallel -> #######Expand to L, RQ later######
 RC_pairs = [
-    (500, 1e-5),  # R1 = 50 Ohm, C1 = 1e-4 F
+    (100, 1e-6),  # R1 = 50 Ohm, C1 = 1e-4 F
     # Add more pairs as needed
 ]
 
 # Frequency range settings
-log_freq_min = -2.0  # log10 of min frequency (Hz)
-log_freq_max_initial = 3.0  # log10 of initial max frequency (Hz)
-points_per_decade = 16  # points per decade
+log_freq_min = -1.0  # log10 of min frequency (Hz)
+log_freq_max_initial = 6  # log10 of initial max frequency (Hz)
+points_per_decade = 32  # points per decade
 
 # Number of iterations (how many times to reduce max frequency)
 num_iterations = 40
@@ -40,15 +40,12 @@ for i in range(num_iterations):
     for R, C in RC_pairs:
         Z += R / (1 + 1j * 2 * np.pi * freq_vec * R * C)
     
-    # Add noise to the impedance ## remove later, modify pyDRT to remove regu ##
-    sigma_n_exp = 0.5
-    Z += sigma_n_exp * (np.random.normal(0, 1, N_freqs) + 1j * np.random.normal(0, 1, N_freqs))
     
     # Create EIS object
     eis = EIS_object(freq_vec, Z.real, Z.imag)
     
     # Run DRT analysis
-    simple_run(eis, cv_type='custom', reg_param=1e-4)  # Using custom regularization with lambda = 1e-4
+    simple_run(eis, cv_type='custom', reg_param=0)  
     
     # Get DRT output
     gamma = eis.gamma
@@ -66,6 +63,11 @@ for i in range(num_iterations):
     current_log_max *= 0.95
 
 # Plot the results
+with open('results.txt', 'w') as f:
+    f.write('Max Frequency (Hz)\tPeak Time Constant (s)\n')
+    for mf, ptc in zip(max_frequencies, peak_time_constants):
+        f.write(f'{mf}\t{ptc}\n')
+
 plt.figure(figsize=(10, 6))
 plt.plot(max_frequencies, peak_time_constants, 'o-', markersize=4)
 plt.xscale('log')
@@ -86,3 +88,8 @@ plt.legend()
 plt.tight_layout()
 plt.show()
 
+# Save the data to a text file
+with open('results.txt', 'w') as f:
+    f.write('Max Frequency (Hz)\tPeak Time Constant (s)\n')
+    for mf, ptc in zip(max_frequencies, peak_time_constants):
+        f.write(f'{mf}\t{ptc}\n')

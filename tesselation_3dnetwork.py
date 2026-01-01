@@ -369,10 +369,10 @@ def run_full_simulation():
     # Table 1: Unified Model Input Parameters
     parameters = {
         # Grid & Microstructure
-        "physical_dims": (0.6e-6, 2.65e-6, 2.65e-6),  # (z, y, x) in meters
+        "physical_dims": (1.2e-6, 5.3e-6, 5.3e-6),  # (z, y, x) in meters #1.2um (thickness), and 5.3x5.3 micron square
         "avg_grain_diameter": 0.14e-6,  # (m) average grain diameter
-        "min_voxels_per_grain": 10,  # minimum voxels per grain (used to calculate total voxels)
-        "contact_ratio": 0.1,         # Fractional contact area (1.0 = ideal, 0.5 = 50% pores)
+        "min_voxels_per_grain": 20,  # minimum voxels per grain (used to calculate total voxels)
+        "contact_ratio": 0.9,         # Fractional contact area (1.0 = ideal, 0.5 = 50% pores)
         
         # Bulk Properties 
         "sigma_bulk": 1.4 * 1e-1,        # (in S/m, we enter in mS/cm -> x10^-1 is the conversion factor)
@@ -415,21 +415,19 @@ def run_full_simulation():
     micro = SyntheticMicrostructure(parameters['grid_dims'], parameters['num_grains'])
     micro.generate_porous_interface(parameters['contact_ratio'])
     
-    # Compute and print grain sizes
+    # Compute and print grain size statistics
     unique_grains, counts = np.unique(micro.grain_map, return_counts=True)
     voxel_size = parameters['voxel_size']
-    
-    # Grain sizes in voxels
-    grain_sizes_voxels = dict(zip(unique_grains, counts))
-    print(f"Average grain size: {np.mean(counts):.1f} voxels")
     
     # Convert to equivalent spherical diameter in nm
     volumes = counts * voxel_size**3  # m^3
     d_eq = 2 * (3 * volumes / (4 * np.pi))**(1/3)  # equivalent diameter in m
     d_eq_nm = d_eq * 1e9  # in nm
-    grain_sizes_nm = dict(zip(unique_grains, d_eq_nm))
-    print(f"Grain sizes (equivalent diameter, nm): { {k: f'{v:.1f}' for k, v in grain_sizes_nm.items()} }")
+    
+    print(f"Total number of grains: {len(unique_grains)}")
     print(f"Average grain size: {np.mean(d_eq_nm):.1f} nm")
+    print(f"Minimum grain size: {np.min(d_eq_nm):.1f} nm")
+    print(f"Maximum grain size: {np.max(d_eq_nm):.1f} nm")
     
     # --- 3. SETUP AND RUN MODEL ---
     model = ImpedanceNetworkModel(micro, parameters)
@@ -478,7 +476,7 @@ def run_full_simulation():
             from pyDRTtools.runs import EIS_object, simple_run
             
             eis = EIS_object(frequencies, Z_spectrum.real, Z_spectrum.imag)
-            simple_run(eis, cv_type='custom', reg_param=1e-4)
+            simple_run(eis, cv_type='custom', reg_param=5e-4)
             
             ax2.plot(eis.out_tau_vec, eis.gamma, 'b-')
             ax2.set_xlabel("Time Constant (s)")
