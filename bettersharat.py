@@ -12,9 +12,9 @@ def analyze(path):
     df = pd.read_csv(p, skiprows=skip, index_col=False); df.columns = df.columns.str.strip()
     
     f, z = df['Frequency (Hz)'].values, df['Impedance Magnitude (Ohms)'].values * np.exp(1j * np.deg2rad(df["Impedance Phase Degrees (')"].values))
-    
-    # Filter <= 15MHz
-    m = f <= 15e6; f, z, w = f[m], z[m], 2*np.pi*f[m]
+
+    # Filter <= 13MHz
+    m = f <= 13e6; f, z, w = f[m], z[m], 2*np.pi*f[m]
     
     # Fit L-RC (>1MHz)
     fm = f > 1e6
@@ -29,7 +29,7 @@ def analyze(path):
     print(f"  RC:   R={R:.1f}, C={C:.2e}")
 
     # Extend & Save
-    f_ex = np.logspace(10, np.log10(1.5e7), int((10 - np.log10(1.5e7))*16))
+    f_ex = np.logspace(10, np.log10(1.3e7), int((10 - np.log10(1.3e7))*16))
     z_ex = R / (1 + 1j*(2*np.pi*f_ex)*R*C)
     
     pd.concat([pd.DataFrame({'f': f_ex, "z'": z_ex.real, "z''": z_ex.imag}),
