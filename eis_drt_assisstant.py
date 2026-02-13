@@ -9,7 +9,7 @@ R_ohmic = 10  # Ohmic resistance (Ohm)
 
 # List of (R, C) pairs for RC elements in parallel -> #######Expand to L, RQ later######
 RC_pairs = [
-    (500, 1e-5),  # R1 = 50 Ohm, C1 = 1e-4 F
+    (100, 1e-6),  # R1 = 50 Ohm, C1 = 1e-4 F
     # Add more pairs as needed
 ]
 
@@ -19,7 +19,7 @@ log_freq_max_initial = 3.0  # log10 of initial max frequency (Hz)
 points_per_decade = 16  # points per decade
 
 # Number of iterations (how many times to reduce max frequency)
-num_iterations = 40
+num_iterations = 30
 
 # Arrays to store results
 peak_time_constants = []
